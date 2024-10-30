@@ -154,6 +154,12 @@ void nfs4_cleanup_clid_entries(void)
 bool nfs_get_grace_status(bool want_grace)
 {
 	uint32_t cur, pro, old;
+	/* check if sticky grace is disabled, check if we are in grace period and return*/
+	if(!nfs_param.nfsv4_param.sticky_grace){
+        	cur = atomic_fetch_uint32_t(&grace_status);
+
+        	return want_grace == (bool)(cur & GRACE_STATUS_ACTIVE);
+	}
 
 	old = atomic_fetch_uint32_t(&grace_status);
 	do {
@@ -182,6 +188,11 @@ void nfs_put_grace_status(void)
 {
 	uint32_t cur;
 
+	/* check if sticky grace is disabled, to skip decrementing ref count*/
+	if(!nfs_param.nfsv4_param.sticky_grace){
+		return; // no sticky grace mode, no decrementing ref count
+	}
+
 	cur = __sync_sub_and_fetch(&grace_status, GRACE_STATUS_REF_INCREMENT);
 	if (cur & GRACE_STATUS_CHANGE_REQ &&
 	    !(cur >> GRACE_STATUS_COUNTER_SHIFT)) {
@@ -208,7 +219,9 @@ static void nfs_lift_grace_locked(void)
 		cur = __sync_and_and_fetch(&grace_status,
 					   ~(GRACE_STATUS_ACTIVE |
 					     GRACE_STATUS_CHANGE_REQ));
-		assert(!(cur & GRACE_STATUS_COUNT_MASK));
+		if(nfs_param.nfsv4_param.sticky_grace){
+			assert(!(cur & GRACE_STATUS_COUNT_MASK));
+		}
 		LogEvent(COMPONENT_STATE, "NFS Server Now NOT IN GRACE");
 	}
 }
@@ -279,15 +292,20 @@ int nfs_start_grace(nfs_grace_start_t *gsp)
 			break;
 
 		/*
-		 * Are there outstanding refs? If so, then set the change req
+		 * Are there outstanding refs(check only if sticky grace is enabled)? 
+		 * If so, then set the change req
 		 * flag and nothing else. If not, then clear the change req
 		 * flag and flip the active bit.
 		 */
-		if (old & GRACE_STATUS_COUNT_MASK) {
-			pro = old | GRACE_STATUS_CHANGE_REQ;
-		} else {
+		if(nfs_param.nfsv4_param.sticky_grace){
+			if (old & GRACE_STATUS_COUNT_MASK) {
+				pro = old | GRACE_STATUS_CHANGE_REQ;
+			} else {
+				pro = old | GRACE_STATUS_ACTIVE;
+				pro &= ~GRACE_STATUS_CHANGE_REQ;
+			}
+		}else {
 			pro = old | GRACE_STATUS_ACTIVE;
-			pro &= ~GRACE_STATUS_CHANGE_REQ;
 		}
 
 		/* If there are no changes, then we don't need to update */
@@ -301,7 +319,8 @@ int nfs_start_grace(nfs_grace_start_t *gsp)
 	 * references outstanding, then we can't do anything else.
 	 * Fail with -EAGAIN so that caller can retry if needed.
 	 */
-	if (!was_grace && (old & GRACE_STATUS_COUNT_MASK)) {
+	if (!was_grace && (old & GRACE_STATUS_COUNT_MASK) 
+			&& nfs_param.nfsv4_param.sticky_grace) {
 		LogEvent(COMPONENT_STATE,
 			 "Unable to start grace, grace status 0x%x",
 			 grace_status);
@@ -540,22 +559,25 @@ void nfs_try_lift_grace(void)
 	 */
 	if (!in_grace) {
 		cur = atomic_fetch_uint32_t(&grace_status);
-		do {
-			old = cur;
+		// no extra check if sticky grace is disabled.
+		if(nfs_param.nfsv4_param.sticky_grace){
+			do {
+				old = cur;
 
-			/* Are we already done? Exit if so */
-			if (!(cur & GRACE_STATUS_ACTIVE)) {
-				PTHREAD_MUTEX_unlock(&grace_mutex);
-				return;
-			}
+				/* Are we already done? Exit if so */
+				if (!(cur & GRACE_STATUS_ACTIVE)) {
+					PTHREAD_MUTEX_unlock(&grace_mutex);
+					return;
+				}
 
-			/* Record that a change has now been requested */
-			pro = old | GRACE_STATUS_CHANGE_REQ;
-			if (pro == old)
-				break;
-			cur = __sync_val_compare_and_swap(&grace_status, old,
+				/* Record that a change has now been requested */
+				pro = old | GRACE_STATUS_CHANGE_REQ;
+				if (pro == old)
+					break;
+				cur = __sync_val_compare_and_swap(&grace_status, old,
 							  pro);
-		} while (cur != old);
+			} while (cur != old);
+		}
 
 		/* Otherwise, go ahead and lift if we can */
 		if (!(old & GRACE_STATUS_COUNT_MASK) &&
