@@ -243,6 +243,7 @@ NFS_KRB5 {}
 
 NFSV4 {}
 --------
+	Sticky_Grace(bool, default true)
 
 	Graceless(bool, default false)
 

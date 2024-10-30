@@ -190,7 +190,7 @@ void nfs_put_grace_status(void)
 
 	/* check if sticky grace is disabled, to skip decrementing ref count*/
 	if(!nfs_param.nfsv4_param.sticky_grace){
-		return; // no sticky grace mode, no decrementing ref count
+		return; /* no sticky grace mode, no decrementing ref count*/
 	}
 
 	cur = __sync_sub_and_fetch(&grace_status, GRACE_STATUS_REF_INCREMENT);
